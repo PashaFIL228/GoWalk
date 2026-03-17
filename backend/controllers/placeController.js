@@ -1,18 +1,23 @@
-const { Place, City, Review } = require('../model/models');
-const { Sequelize } = require('sequelize');
+const { Place, City, Review } = require('../model/models'); // проверьте путь
+const { Sequelize, Op } = require('sequelize');
 const socket = require('../socket');
 
+// Создание места (админка)
 exports.createPlace = async (req, res) => {
     try {
         const { cityName, name, type, description, photo_url, latitude, longitude } = req.body;
-        // Найти или создать город
-        let city = await City.findOne({ where: { name: cityName } });
-        if (!city) {
-            city = await City.create({ name: cityName });
-        }
+
+        // Валидация координат
         if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
             return res.status(400).json({ message: 'Некорректные координаты' });
         }
+
+        // Найти или создать город
+        let city = await City.findOne({ where: { name: { [Op.iLike]: cityName } } });
+        if (!city) {
+            city = await City.create({ name: cityName });
+        }
+
         const place = await Place.create({
             city_id: city.id,
             name,
@@ -23,6 +28,7 @@ exports.createPlace = async (req, res) => {
             longitude,
             rating: 0
         });
+
         res.status(201).json(place);
     } catch (err) {
         console.error(err);
@@ -30,26 +36,45 @@ exports.createPlace = async (req, res) => {
     }
 };
 
-
-// Поиск мест по названию города
+// Поиск мест по городу (с рейтингом)
 exports.getPlacesByCity = async (req, res) => {
     try {
         const { cityName } = req.params;
-        const city = await City.findOne({ where: { name: cityName } });
+        const city = await City.findOne({
+            where: { name: { [Op.iLike]: cityName } }
+        });
         if (!city) return res.status(404).json({ message: 'Город не найден' });
 
         const places = await Place.findAll({
-            where: { city_id: city.id }
-            // Убрано всё, что связано с Reviews
+            where: { city_id: city.id },
+            include: [{
+                model: Review,
+                attributes: [] // не выбираем поля отзывов, только агрегат
+            }],
+            attributes: {
+                include: [
+                    [Sequelize.fn('AVG', Sequelize.col('reviews.rating')), 'avgRating']
+                ]
+            },
+            group: ['Place.id']
         });
-        res.json(places);
+
+        // Преобразуем результат: добавим поле rating (если avgRating есть)
+        const result = places.map(p => {
+            const plain = p.get({ plain: true });
+            plain.rating = plain.avgRating ? parseFloat(plain.avgRating).toFixed(1) : 0;
+            delete plain.avgRating;
+            return plain;
+        });
+
+        res.json(result);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: err.message });
     }
 };
 
-// Возвращает 4 популярных места
+// Популярные места (топ-4 по рейтингу)
 exports.getPopularPlaces = async (req, res) => {
     try {
         const places = await Place.findAll({
@@ -76,15 +101,16 @@ exports.getRandomPlace = async (req, res) => {
     }
 };
 
-// Получить место по ID с отзывами
+// Получить место по ID (с отзывами и городом)
 exports.getPlaceById = async (req, res) => {
     try {
         const place = await Place.findByPk(req.params.id, {
-            include: [City]
+            include: [City, Review]
         });
         if (!place) return res.status(404).json({ message: 'Место не найдено' });
         res.json(place);
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 };
